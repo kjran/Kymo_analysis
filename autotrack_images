@@ -1,0 +1,2128 @@
+function [pixelcoordsortflip, mt_length, video_time, Eachline, NumMids2] = autotrackkymos6(Image)
+
+%%Load images, clean up, and skeletonize
+
+%load image (pixel classification/segmentation using ilastik)
+%Image = imread('1166r_002kymo2-tmr_Simple Segmentation.jpg');
+%complement image
+Imagecomplement = imcomplement(Image);
+% binarize image
+Imagebinarize = imbinarize(Imagecomplement);
+% fill any holes
+Imagefill = imfill(Imagebinarize, 'holes'); 
+%thin image
+Imagethin = bwmorph(Imagefill, 'thin', Inf); 
+%remove single pixel spurs
+Imagespur = bwmorph(Imagethin, 'spur');
+%remove any object smaller than 4 pixels
+Imageprune = bwareaopen(Imagespur, 4, 8); 
+%skeletonize with bwmorph uses 8-connectivity
+Imageskel3 = bwmorph(Imageprune, 'skel', Inf);
+%remove spurs
+Imageskel2 = bwmorph(Imageskel3, 'spur');
+%remove any object smaller than 5 pixels
+Imageskel = bwareaopen(Imageskel2, 5, 8);
+
+clear Imagecomplement Imagebinarize Imagefill Imagethin Imagespur Imageprune Imageskel3 Imageskel2;
+
+%%
+%Find and erase branchpoints 
+
+%find branchpoints
+Imagebranch = bwmorph(Imageskel,'branchpoint');
+
+%dilate branchpoints by one pixel
+DilateBranchpoint = imdilate(Imagebranch, true(3));
+
+%erase dilated branchpoints
+for i =1:size(Imageskel, 1)
+    for j = 1:size(Imageskel, 2)
+    if DilateBranchpoint(i,j) == 1
+        Imagebranchremove(i,j) = 0;
+        
+    else Imagebranchremove(i,j) = Imageskel(i,j); 
+    end
+   
+    end
+end
+
+%erase any objects smaller than 5 pixels (ie. 1 second for kinesin, 2.5 seconds
+%for minidimer)
+Imagebranchremove2 = bwareaopen(Imagebranchremove, 5, 8); 
+clear Imagebranchremove; 
+
+
+%%Isolate single tracks
+
+%find all connected objects - this makes a separate cell for each as a
+%PixelIdxList
+Alllines = bwconncomp(Imagebranchremove2); 
+
+%Convert the pixelindexed structure into single line skeleton image arrays
+Eachline=cell(1,Alllines.NumObjects);
+for k = 1:Alllines.NumObjects
+    Eachline{1,k}=zeros(size(Imageskel, 1), size(Imageskel,2)); 
+    for i=1:size(Alllines.PixelIdxList{1,k},1)
+        pixelID=Alllines.PixelIdxList{1,k}(i,1);
+        Eachline{1,k}(pixelID)=1;
+    end
+end
+
+clear pixelID i j k
+
+%%
+%For linking segments - need to add back the dilated BPcluster and then skeletonize again. 
+
+AlldilatedBP = bwconncomp(DilateBranchpoint); 
+
+%Convert the pixelindexed structure into single line skeleton image arrays
+EachDilatedBP=cell(1,AlldilatedBP.NumObjects);
+for k = 1:AlldilatedBP.NumObjects
+    EachDilatedBP{1,k}=zeros(size(Imageskel, 1), size(Imageskel,2)); 
+    for i=1:size(AlldilatedBP.PixelIdxList{1,k},1)
+        pixelID=AlldilatedBP.PixelIdxList{1,k}(i,1);
+        EachDilatedBP{1,k}(pixelID)=1;
+    end
+end
+
+clear pixelID
+
+%%%%%%%%%
+%% run through all this once, then if NumMids > 0 then do the following:  
+
+
+%get the X,Y coordinates of the pixellist, the final output here (pixelcoordsortflip) has
+%column 1 is the kymoY (time as frame number) and column2 is the kymoX(position as pixel)
+
+
+for k = 1:size(Eachline,2)
+    pixelcoord{1,k} = regionprops(Eachline{1,k}, 'Pixellist'); 
+    pixelcoordsorted{1,k} = sortrows(pixelcoord{1,k}.PixelList, 2);
+    pixelcoordsortflip{1,k}(:,1) = pixelcoordsorted{1,k}(:,2); 
+    pixelcoordsortflip{1,k}(:,2) = pixelcoordsorted{1,k}(:,1); 
+end
+
+clear pixelcoord pixelcoordsorted;
+
+% Flag negative slope lines
+for k = 1: size(pixelcoordsortflip,2)
+overall_slope{1,k}= (pixelcoordsortflip{1,k}(end,2))-(pixelcoordsortflip{1,k}(1,2));
+if overall_slope{1,k} < 0
+neg_slope(1,k) = 1;
+else neg_slope(1,k) = 0;
+end
+end
+
+
+% smooth the data, determine slope of start and end segments. 
+seg_slope_start = cell(1, size(pixelcoordsortflip,2));
+seg_slope_end = cell(1, size(pixelcoordsortflip,2));   
+for k = 1:size(pixelcoordsortflip,2)
+    %get track,x here is arbitrary time (framrate) and y is position
+    x = [1:size(pixelcoordsortflip{1,k},1)]';
+    y=pixelcoordsortflip{1,k}(:,2);
+    
+    %smooth the data
+    y_smooth = smooth(y);
+    smoothcoord{1,k} = smooth(pixelcoordsortflip{1,k}(:,2)); 
+    
+    %calculate the slope of the first and last 15 frames = 7.5 seconds for minidimer (can modify this based
+    %on frame rate if needed)
+    if length(y_smooth) > 15
+     slopestart=(y_smooth(15)-y_smooth(1))/(x(15)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(end-14))/(x(end)-x(end-14));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    else 
+     slopestart=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    end
+    clear x y y_smooth slopestart slopeend
+end
+
+%%
+%Match endpoints with branchpoints 
+
+%find startpoints/endpoints for each line segment
+Imageendpoints = bwmorph(Imagebranchremove2, 'endpoint'); 
+
+for k = 1:numel(Eachline)
+Eachendpoint{1,k} = bwmorph(Eachline{1,k}, 'endpoint'); 
+end
+
+% dilate out one pixel from each endpoint and make cell array of border pixels to the startpoints and endpoints
+for k = 1:size(Eachendpoint,2)
+EachdilatedEndpoint{1,k} = imdilate(Eachendpoint{1,k}, true(3));
+EachborderPixels{1,k} = bwperim(EachdilatedEndpoint{1,k});
+end
+
+
+%Make PixelIdxList for the startpoint and endpoint border pixels  
+for k = 1:size(EachborderPixels,2)
+    BorderpixelsIdx{1,k} = regionprops(EachborderPixels{1,k}, 'PixelIdxList'); 
+   
+if neg_slope(1,k) == 0
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+    end
+   
+else
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+
+    end
+end
+
+    BorderpixelIdxstart2{1,k} = (BorderpixelIdxstart{1,k}.PixelIdxList);
+    BorderpixelIdxend2{1,k} = (BorderpixelIdxend{1,k}.PixelIdxList);
+end
+
+ clear BorderpixelIdxstart BorderpixelIdxend
+ 
+%NaN pad the BorderPixelIdxLists and make them a matrix.
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxstart2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxstart2)
+        for j=cellfun('size',BorderpixelIdxstart2(i),1)+1:maxLengthCell
+             BorderpixelIdxstart2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxstartmat2=cell2mat(BorderpixelIdxstart2); %This makes it a matrix
+clear maxLengthCell
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxend2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxend2)
+        for j=cellfun('size',BorderpixelIdxend2(i),1)+1:maxLengthCell
+             BorderpixelIdxend2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxendmat2=cell2mat(BorderpixelIdxend2); %This makes it a matrix
+clear maxLengthCell BorderpixelIdxstart2 BorderpixelIdxend2
+
+% Convert the dilated branchpoint matrix into PixelIdxList
+ImagebranchPixelIdxList = (struct2cell(regionprops(DilateBranchpoint, 'PixelIdxList'))); 
+%ImagebranchPixelIdxList2 = cat(1, ImagebranchPixelIdxList{:});
+
+%NaN pad the ImagebranchPixeslIdxList and make it a matrix.
+
+    maxLengthCell=max(cellfun('size',ImagebranchPixelIdxList,1));  %finding the longest vector in the cell array
+    for i=1:length(ImagebranchPixelIdxList)
+        for j=cellfun('size',ImagebranchPixelIdxList(i),1)+1:maxLengthCell
+             ImagebranchPixelIdxList{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   ImagebranchPixelIdxListmat2=cell2mat(ImagebranchPixelIdxList); %This makes it a matrix
+clear maxLengthCell ImagebranchPixelIdxList
+
+%Find branchpoints pixels that overlap with the startpoint and endpoint borderpixels
+
+[~, Locb] = ismember(BorderpixelIdxendmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundend = Locb; 
+clear Locb
+[~, Locb] = ismember(BorderpixelIdxstartmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundstart = Locb;
+clear Locb
+
+
+%%
+%Match the beginning pieces to middle or end pieces that share a branchpoint
+
+% give the branchpoint cluster associated with the branchpoint pixelidx
+Branchpointsfoundend(Branchpointsfoundend == 0) = NaN; 
+Branchpointsfoundstart(Branchpointsfoundstart == 0) = NaN;
+
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundstart);
+BPClusterStart = col; 
+clear col
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundend);
+BPClusterEnd = col; 
+clear col
+clear Branchpointsfoundend Branchpointsfoundstart
+%find the unique values per column - for rare instances with two values,
+%the smaller one goes to the Start Cluster and the larger one to the end
+%cluster, unless the slope is negative, then reverse this. 
+
+for k = 1:size(BPClusterStart,2)
+    C{1,k} = unique(BPClusterStart(:,k)); 
+    UniqueStart{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:size(BPClusterEnd,2)
+    C{1,k} = unique(BPClusterEnd(:,k)); 
+    UniqueEnd{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:length(UniqueEnd)
+    if neg_slope == 0
+    if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(1,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(2,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+    end
+    else 
+      if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(2,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(1,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+      end
+    end
+end
+
+clear BPClusterEnd BPClusterStart UniqueEnd UniqueStart
+
+%Find beginning, middle, end, and unconnected pieces
+Beginpieces = cell(1,Alllines.NumObjects);
+Endpieces = cell(1,Alllines.NumObjects);
+Midpieces = cell(1,Alllines.NumObjects);
+Unconnected = cell(1,Alllines.NumObjects);
+for k=1:size(BPClusterEnd2,2)
+       
+    if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 0
+        Beginpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "B";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 1
+        Endpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "E";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 0
+        Midpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "M";
+    else if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 1
+        Unconnected{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "U";
+        end
+        end
+        end
+    end
+end
+
+
+% NaN pad and cell2mat for BPCluster2.
+
+for k = 1:length(BPClusterStart2)
+    if isempty(BPClusterStart2{1,k}) == 1
+        BPClusterStart3{1,k} = NaN;
+    else BPClusterStart3{1,k} = BPClusterStart2{1,k};
+    end
+end
+        BPClusterStart3 = cell2mat(BPClusterStart3); 
+        
+for k = 1:length(BPClusterEnd2)
+    if isempty(BPClusterEnd2{1,k}) == 1
+        BPClusterEnd3{1,k} = NaN;
+    else BPClusterEnd3{1,k} = BPClusterEnd2{1,k};
+    end
+end
+        BPClusterEnd3 = cell2mat(BPClusterEnd3);
+        
+clear BPClusterStart2 BPClusterEnd2
+
+% BPClusterStarts for Midpieces and Endpieces, BPCLusterEnds for
+% Beginpieces and Midpieces: 
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "B" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Beg(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Beg(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Mid(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_Mid(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "E" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_End(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_End(1,k) = NaN;
+    end
+end
+
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    Beg_match_Beg{1,k} = find(BPClusterEnd_Beg == BPClusterEnd_Beg(1,k));
+    End_match_Beg{1,k} = find(BPClusterStart_End == BPClusterEnd_Beg(1,k));
+    Mid_match_Beg{1,k} = find(BPClusterStart_Mid == BPClusterEnd_Beg(1,k));
+    Beg_match_End{1,k} = find(BPClusterEnd_Beg == BPClusterStart_End(1,k));
+    Mid_match_End{1,k} = find(BPClusterEnd_Mid == BPClusterStart_End(1,k));
+    Beg_match_Mid{1,k} = find(BPClusterEnd_Beg == BPClusterStart_Mid(1,k));
+    Mid_match_Mid{1,k} = find(BPClusterEnd_Mid == BPClusterStart_Mid(1,k));
+    End_match_Mid{1,k} = find(BPClusterStart_End == BPClusterEnd_Mid(1,k));
+    
+    if Lineassign(1,k) == "B" && isempty(End_match_Beg{1,k}) == 1 && isempty(Mid_match_Beg{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "E" && isempty(Beg_match_End{1,k}) == 1 && isempty(Mid_match_End{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(Mid_match_Mid,2)
+    if Lineassign(1,k) == "M" && length(Mid_match_Mid{1,k}) == 1
+        if Mid_match_Mid{1,k} == k
+        Mid_match_Mid{1,k} = [];
+        else Mid_match_Mid{1,k} = Mid_match_Mid{1,k};
+        end
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+        
+% How many Mids are left? 
+NumMids = nnz(strcmp(Lineassign,'M'));
+
+% BPClusterStarts for Midpieces and Endpieces, BPCLusterEnds for
+% Beginpieces and Midpieces: 
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "B" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Beg(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Beg(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Mid(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_Mid(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "E" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_End(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_End(1,k) = NaN;
+    end
+end
+
+
+%%
+%Find all Begs, mids, and ends that match a given beg
+for k= 1:length(BPClusterEnd3)
+    Beg_match_Beg{1,k} = find(BPClusterEnd_Beg == BPClusterEnd_Beg(1,k));
+    End_match_Beg{1,k} = find(BPClusterStart_End == BPClusterEnd_Beg(1,k));
+    Mid_match_Beg{1,k} = find(BPClusterStart_Mid == BPClusterEnd_Beg(1,k));
+    Beg_match_End{1,k} = find(BPClusterEnd_Beg == BPClusterStart_End(1,k));
+    Mid_match_End{1,k} = find(BPClusterEnd_Mid == BPClusterStart_End(1,k));
+    Beg_match_Mid{1,k} = find(BPClusterEnd_Beg == BPClusterStart_Mid(1,k));
+    Mid_match_Mid{1,k} = find(BPClusterEnd_Mid == BPClusterStart_Mid(1,k));
+    End_match_Mid{1,k} = find(BPClusterStart_End == BPClusterEnd_Mid(1,k));
+end
+
+    
+%Count how many pieces are intesecting
+%for k= 1:length(BPClusterEnd3)
+    %Total_pieces_matched(1,k) = length(Beg_match_Beg{1,k}) + length(End_match_Beg{1,k}) + length(Mid_match_Beg{1,k});
+%end
+
+
+%If Beg = 1, and mids + ends = 1 then match them up. 
+
+for k= 1:length(BPClusterEnd3)
+    if  length(Beg_match_Beg{1,k}) == 1 && isempty(Mid_match_Beg{1,k}) == 1 && length(End_match_Beg{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,End_match_Beg{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+    else if  length(Beg_match_Beg{1,k}) == 1 && length(Mid_match_Beg{1,k}) == 1 && isempty(End_match_Beg{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}))});
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Mid_match_Beg{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        end 
+    end
+end
+
+
+
+%%
+% If Beg = 1, and ends and mids > 1; 
+%report slope differences
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1 
+        if isempty(Mid_match_Beg{1,k}) == 1 %match with the right end
+            for j = 1:length(End_match_Beg{1,k})
+           Slope_comp_End1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Beg{1,k}(1,j))}));
+            end
+        else Slope_comp_End1{1,k} = NaN;
+        end
+    else Slope_comp_End1{1,k} = NaN;
+    end
+end
+
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1
+        if isempty(End_match_Beg{1,k}) == 1 %match with the right mid
+            for i = 1:length(Mid_match_Beg{1,k})
+           Slope_comp_Mid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Beg{1,k}(1,i))})); 
+            end
+         else Slope_comp_Mid1{1,k} = NaN;
+        end
+    else Slope_comp_Mid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1 && isempty(End_match_Beg{1,k}) == 0 && isempty(Mid_match_Beg{1,k}) == 0  %match with the right mid or end
+            for i = 1:length(Mid_match_Beg{1,k})
+            for j = 1:length(End_match_Beg{1,k})
+           Slope_comp_Mid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Beg{1,k}(1,i))})); 
+           Slope_comp_End1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Beg{1,k}(1,j))})); 
+            end
+            end
+    end
+end
+
+
+
+%match the ones with the smallest slope difference.
+%For ends
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_End1{1,k}) > 1
+            for j = 1:length(Slope_comp_End1{1,k})
+                if (Slope_comp_End1{1,k}(1,j)) == min(Slope_comp_End1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(End_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+%For mids
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_Mid1{1,k}) > 1
+            for j = 1:length(Slope_comp_Mid1{1,k})
+                if (Slope_comp_Mid1{1,k}(1,j)) == min(Slope_comp_Mid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%For mid/end
+for k= 1:length(BPClusterEnd3)
+    if ~isnan(Slope_comp_Mid1{1,k}(1,1)) == 1 && ~isnan(Slope_comp_End1{1,k}(1,1)) == 1
+            for j = 1:length(Slope_comp_End1{1,k})
+            for i = 1:length(Slope_comp_Mid1{1,k})
+                if (Slope_comp_Mid1{1,k}(1,i)) == min(([(Slope_comp_Mid1{1,1}); (Slope_comp_End1{1,1})]))
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}(1,i)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                else if (Slope_comp_End1{1,k}(1,j)) == min(([(Slope_comp_Mid1{1,1}); (Slope_comp_End1{1,1})]))
+                        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}(1,j)))}); 
+                        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                        Eachline{1,(End_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                    end
+                end
+            end
+            end
+    end
+end
+
+ 
+%%
+%If ends and mids = 1 and Beg > 1, then need to compare the E/M to the Begs
+%by slope. 
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) == 1 
+        if isempty(Mid_match_Beg{1,k}) == 1 %match with the right end
+            for j = 1:length(Beg_match_Beg{1,k})
+           Slope_comp_BegEnd1{1,k}(1,j) = abs((seg_slope_end{(Beg_match_Beg{1,k}(1,j))}) - (seg_slope_start{(End_match_Beg{1,k})}));
+            end
+        else Slope_comp_BegEnd1{1,k} = NaN;
+        end
+    else Slope_comp_BegEnd1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) == 1 
+        if isempty(End_match_Beg{1,k}) == 1 %match with the right mid
+            for j = 1:length(Beg_match_Beg{1,k})
+           Slope_comp_BegMid1{1,k}(1,j) = abs((seg_slope_end{(Beg_match_Beg{1,k}(1,j))}) - (seg_slope_start{(Mid_match_Beg{1,k})}));
+            end
+        else Slope_comp_BegMid1{1,k} = NaN;
+        end
+    else Slope_comp_BegMid1{1,k} = NaN;
+    end
+end
+
+clear k j i 
+
+
+%match the right beg up to the E/M
+
+for k= 1:numel(BPClusterEnd3)
+    if numel(Slope_comp_BegMid1{1,k}) > 1
+       for j = 1:numel(Slope_comp_BegMid1{1,k}) 
+            if (Slope_comp_BegMid1{1,k}(1,j)) == min(Slope_comp_BegMid1{1,k})
+                    Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,1))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,(Beg_match_Beg{1,k}(1,j))))});          
+                    Eachline{1,(Mid_match_Beg{1,k}(1,1))} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                    Eachline{1,(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+            end
+       end
+    end
+end
+
+
+
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_BegEnd1{1,k}) > 1 
+            for j = 1:length(Slope_comp_BegEnd1{1,k})
+                if (Slope_comp_BegEnd1{1,k}(1,j)) == min(Slope_comp_BegEnd1{1,k})
+        Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k})))}); 
+        Eachline{1,(End_match_Beg{1,k})} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%%
+%If End/mids >1, and Begs >1, then can compare slopes and match. 
+%calc slope for each Beg piece 
+
+
+for k = 1: length(BPClusterEnd3)
+    for i = 1:length(Beg_match_Beg{1,k})
+    if length(Beg_match_Beg{1,k}) > 1 
+        slopebegtemp(1,i) = (seg_slope_end{(Beg_match_Beg{1,k}(1,i))});
+    else slopebegtemp(1,i) = NaN;   
+    end
+    end
+    for j = 1:length(Mid_match_Beg{1,k})
+    if length(Mid_match_Beg{1,k}) >= 1   
+        slopemidtemp(j,1) = seg_slope_start{(Mid_match_Beg{1,k}(1,j))};
+    else slopemidtemp(j,1) = NaN;
+    end
+    end
+    for m = 1:length(End_match_Beg{1,k})
+    if length(End_match_Beg{1,k}) >= 1    
+        slopeendtemp(m,1) = seg_slope_start{(End_match_Beg{1,k}(1,m))};
+    else slopeendtemp(m,1) = NaN;
+    end
+    end   
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1
+        if length(End_match_Beg{1,k}) >= 1
+           Slope_comp_BegsEnds2{1,k} = abs(slopeendtemp - slopebegtemp);
+        else  Slope_comp_BegsEnds2{1,k} = NaN;
+        end
+        if length(Mid_match_Beg{1,k}) >= 1
+           Slope_comp_BegsMids2{1,k} = abs(slopemidtemp - slopebegtemp);
+        else Slope_comp_BegsMids2{1,k} = NaN;
+        end
+    else  Slope_comp_BegsEnds2{1,k} = NaN;
+          Slope_comp_BegsMids2{1,k} = NaN;
+    end
+    clear slopebegtemp slopemidtemp slopeendtemp
+end
+
+%compare slopes and match em up
+%for mids
+
+for k= 1:length(BPClusterEnd3)
+    if (isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids 
+       [V,I]=min(Slope_comp_BegsMids2{1,k},[],'all','linear');
+       [i,j]=ind2sub(size(Slope_comp_BegsMids2{1,k}),I);          
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,(Mid_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+    end
+    clear V I i j;
+end
+
+%for ends
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with ends 
+       [V,I]=min(Slope_comp_BegsEnds2{1,k},[],'all','linear');
+       [i,j]=ind2sub(size(Slope_comp_BegsEnds2{1,k}),I);          
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(End_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+    end
+    clear V I i j;
+end
+
+
+% for mids and ends.
+ 
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids and ends 
+        [r,c] = size(Slope_comp_BegsEnds2{1,k});
+        for i = 1:r
+            for j = 1:c
+               if (Slope_comp_BegsEnds2{1,k}(i,j)) == (min([(Slope_comp_BegsMids2{1,k});(Slope_comp_BegsEnds2{1,k})] ,[],'all'))                
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(End_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+               end
+            end
+        end
+clear r c i j
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids and ends 
+        [r,c] = size(Slope_comp_BegsMids2{1,k});
+        for i = 1:r
+            for j = 1:c
+               if (Slope_comp_BegsMids2{1,k}(i,j)) == (min([(Slope_comp_BegsMids2{1,k});(Slope_comp_BegsEnds2{1,k})] ,[],'all'))                
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,(Mid_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+               end
+            end
+        end
+clear r c i j
+    end
+end
+
+%match mids up with begs or ends if they are alone
+%match a mid with a lone begin
+for k=1:size(BPClusterEnd3,2)
+    if  Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Beg_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+    end
+end
+%match a mid with a lone end
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,End_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+	end
+end
+%match a mid with a lone mid
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1 && length(Mid_match_Mid{1,k}) == 1 
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Mid_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+	end
+end
+
+%match a mid up with a lone Beg and end
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k})})|(Eachline{1,(End_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Beg_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));
+Eachline{1,End_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));
+	end
+end
+
+%%
+%match mids up with the best end or mid
+
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) > 1
+        if isempty(Mid_match_Mid{1,k}) == 1 %match with the right end
+            for j = 1:length(End_match_Mid{1,k})
+           Slope_comp_MidEnd1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Mid{1,k}(1,j))}));
+            end
+        end
+    else Slope_comp_MidEnd1{1,k} = NaN;
+    end
+end
+
+
+for k= 1:length(BPClusterEnd3)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(Mid_match_Mid{1,k}) > 1
+        if isempty(End_match_Mid{1,k}) == 1 %match with the right mid
+            for i = 1:length(Mid_match_Mid{1,k})
+           Slope_comp_MidMid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Mid{1,k}(1,i))})); 
+            end
+        end
+    else Slope_comp_MidMid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) >= 1 && length(Mid_match_Mid{1,k}) >= 1
+            for i = 1:length(Mid_match_Mid{1,k})
+            for j = 1:length(End_match_Mid{1,k})
+           Slope_comp_MidMid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Mid{1,k}(1,i))})); 
+           Slope_comp_MidEnd1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Mid{1,k}(1,j))})); 
+            end
+            end
+    end
+end
+
+
+
+
+%match the ones with the smallest slope difference.
+%For ends
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_MidEnd1{1,k}) > 1
+            for j = 1:length(Slope_comp_MidEnd1{1,k})
+                if (Slope_comp_MidEnd1{1,k}(1,j)) == min(Slope_comp_MidEnd1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(End_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+
+%For mids
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_MidMid1{1,k}) > 1
+            for j = 1:length(Slope_comp_MidMid1{1,k})
+                if (Slope_comp_MidMid1{1,k}(1,j)) == min(Slope_comp_MidMid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%For mid/end
+for k= 1:length(BPClusterEnd3)
+     if ~isnan(Slope_comp_MidMid1{1,k}(1,1)) == 1 && ~isnan(Slope_comp_MidEnd1{1,k}(1,1)) == 1
+            for j = 1:length(Slope_comp_MidEnd1{1,k})
+            for i = 1:length(Slope_comp_MidMid1{1,k})
+                if (Slope_comp_MidMid1{1,k}(1,i)) == min(([(Slope_comp_MidMid1{1,1}); (Slope_comp_MidEnd1{1,1})]))
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}(1,i)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Mid{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                else if (Slope_comp_MidEnd1{1,k}(1,j)) == min(([(Slope_comp_MidMid1{1,1}); (Slope_comp_MidEnd1{1,1})]))
+                        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}(1,j)))}); 
+                        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                        Eachline{1,(End_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                    end
+                end
+            end
+            end
+    end
+end
+
+%match with best begin: 
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) > 1
+            for j = 1:length(Beg_match_Mid{1,k})
+           Slope_comp_BegMid1{1,k}(1,j) = abs((seg_slope_start{1,k}) - (seg_slope_end{(Beg_match_Mid{1,k}(1,j))}));
+            end  
+    else Slope_comp_BegMid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_BegMid1{1,k}) > 1
+            for j = 1:length(Slope_comp_BegMid1{1,k})
+                if (Slope_comp_BegMid1{1,k}(1,j)) == min(Slope_comp_BegMid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Beg_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+
+
+
+%%
+%cleanup the list of lines before looping
+%remove all cells that have just the branchpoint cluster in them. 
+
+for i = 1:length(EachDilatedBP)
+Eachline(cellfun(@(c) isequal(c, EachDilatedBP{1,i}), Eachline)) = [];
+end
+
+%is this working?
+%for k = 1:length(Eachline)
+    %T = (Eachline{1,k} - DilateBranchpoint);
+    %T = my_changem(T, [0], [-1]);
+    %if sum(T, 'all') == 0
+       % Eachline{1,k} = {};
+   % end
+%clear T
+%end
+
+%remove all the empty cells in Eachline
+for k = 1:length(Eachline)
+    if ~isempty(Eachline{1,k}) == 1 && sum(Eachline{1,k}, 'all') == 0
+        Eachline{1,k} = {};
+    end
+
+end
+
+Eachline = Eachline(~cellfun('isempty',Eachline));
+
+%thin the lines.
+for k=1:length(Eachline)
+    if isempty(Eachline{1,k}) == 0
+Eachline{1,k} = bwmorph((Eachline{1,k}), 'thin', Inf);
+    else Eachline{1,k} = {};
+    end
+end
+
+%keep single largest object in Each eachline
+for k = 1: size(Eachline,2)
+Eachline{1,k} = bwareafilt(Eachline{1,k}, 1); 
+end
+
+clear Beg_match_Beg Beginpieces BorderpixelIdxendmat2 BorderpixelIdxstartmat2 BorderpixelsIdx BPClusterEnd3 BPClusterEnd_Beg BPClusterEnd_Mid BPClusterStart3 BPClusterStart_End BPClusterStart_Mid
+clear EachborderPixels EachdilatedEndpoint Eachendpoint End_match_Beg Endpieces Imageendpoints Lineassign Mid_match_Beg Midpieces neg_slope overall_slope pixelcoordsortflip 
+clear seg_slope_end seg_slope_start Slope_comp_BegEnd1 Slope_comp_BegMid1 smoothcoord Unconnected
+clear k m i r Slope_comp_End1 Slope_comp_Mid1 Slope_comp_BegsEnds2 Slope_comp_BegsMids2 Beg_match_End Beg_match_Mid Mid_match_End
+clear Mid_match_Mid End_match_Mid Slope_comp_MidEnd1 Slope_comp_MidMid1
+
+
+%get the X,Y coordinates of the pixellist, the final output here (pixelcoordsortflip) has
+%column 1 is the kymoY (time as frame number) and column2 is the kymoX(position as pixel)
+
+
+for k = 1:length(Eachline)
+    pixelcoord{1,k} = regionprops(Eachline{1,k}, 'Pixellist'); 
+    pixelcoordsorted{1,k} = sortrows(pixelcoord{1,k}.PixelList, 2);
+    pixelcoordsortflip{1,k}(:,1) = pixelcoordsorted{1,k}(:,2); 
+    pixelcoordsortflip{1,k}(:,2) = pixelcoordsorted{1,k}(:,1); 
+end
+
+clear pixelcoord pixelcoordsorted;
+
+% Flag negative slope lines
+for k = 1: length(pixelcoordsortflip)
+overall_slope{1,k}= (pixelcoordsortflip{1,k}(end,2))-(pixelcoordsortflip{1,k}(1,2));
+if overall_slope{1,k} < 0
+neg_slope(1,k) = 1;
+else neg_slope(1,k) = 0;
+end
+end
+
+
+% smooth the data, determine slope of start and end segments. 
+seg_slope_start = cell(1, length(pixelcoordsortflip));
+seg_slope_end = cell(1, length(pixelcoordsortflip));   
+for k = 1:length(pixelcoordsortflip)
+    %get track,x here is arbitrary time (framrate) and y is position
+    x = [1:size(pixelcoordsortflip{1,k},1)]';
+    y=pixelcoordsortflip{1,k}(:,2);
+    
+    %smooth the data
+    y_smooth = smooth(y);
+    smoothcoord{1,k} = smooth(pixelcoordsortflip{1,k}(:,2)); 
+    
+    %calculate the slope of the first and last 15 frames = 7.5 seconds for minidimer (can modify this based
+    %on frame rate if needed)
+    if length(y_smooth) > 15
+     slopestart=(y_smooth(15)-y_smooth(1))/(x(15)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(end-14))/(x(end)-x(end-14));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    else 
+     slopestart=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    end
+    clear x y y_smooth slopestart slopeend
+end
+
+%%
+%Match endpoints with branchpoints 
+
+%find startpoints/endpoints for each line segment
+Imageendpoints = bwmorph(Imagebranchremove2, 'endpoint'); 
+
+for k = 1:numel(Eachline)
+Eachendpoint{1,k} = bwmorph(Eachline{1,k}, 'endpoint'); 
+end
+
+% dilate out one pixel from each endpoint and make cell array of border pixels to the startpoints and endpoints
+for k = 1:length(Eachendpoint)
+EachdilatedEndpoint{1,k} = imdilate(Eachendpoint{1,k}, true(3));
+EachborderPixels{1,k} = bwperim(EachdilatedEndpoint{1,k});
+end
+
+
+%Make PixelIdxList for the startpoint and endpoint border pixels  
+for k = 1:length(EachborderPixels)
+    BorderpixelsIdx{1,k} = regionprops(EachborderPixels{1,k}, 'PixelIdxList'); 
+   
+if neg_slope(1,k) == 0
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+    end
+   
+else
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+
+    end
+end
+
+    BorderpixelIdxstart2{1,k} = (BorderpixelIdxstart{1,k}.PixelIdxList);
+    BorderpixelIdxend2{1,k} = (BorderpixelIdxend{1,k}.PixelIdxList);
+end
+
+ clear BorderpixelIdxstart BorderpixelIdxend
+ 
+%NaN pad the BorderPixelIdxLists and make them a matrix.
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxstart2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxstart2)
+        for j=cellfun('size',BorderpixelIdxstart2(i),1)+1:maxLengthCell
+             BorderpixelIdxstart2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxstartmat2=cell2mat(BorderpixelIdxstart2); %This makes it a matrix
+clear maxLengthCell
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxend2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxend2)
+        for j=cellfun('size',BorderpixelIdxend2(i),1)+1:maxLengthCell
+             BorderpixelIdxend2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxendmat2=cell2mat(BorderpixelIdxend2); %This makes it a matrix
+clear maxLengthCell BorderpixelIdxstart2 BorderpixelIdxend2
+
+% Convert the dilated branchpoint matrix into PixelIdxList
+ImagebranchPixelIdxList = (struct2cell(regionprops(DilateBranchpoint, 'PixelIdxList'))); 
+%ImagebranchPixelIdxList2 = cat(1, ImagebranchPixelIdxList{:});
+
+%NaN pad the ImagebranchPixeslIdxList and make it a matrix.
+
+    maxLengthCell=max(cellfun('size',ImagebranchPixelIdxList,1));  %finding the longest vector in the cell array
+    for i=1:length(ImagebranchPixelIdxList)
+        for j=cellfun('size',ImagebranchPixelIdxList(i),1)+1:maxLengthCell
+             ImagebranchPixelIdxList{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   ImagebranchPixelIdxListmat2=cell2mat(ImagebranchPixelIdxList); %This makes it a matrix
+clear maxLengthCell ImagebranchPixelIdxList
+
+%Find branchpoints pixels that overlap with the startpoint and endpoint borderpixels
+
+[~, Locb] = ismember(BorderpixelIdxendmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundend = Locb; 
+clear Locb
+[~, Locb] = ismember(BorderpixelIdxstartmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundstart = Locb;
+clear Locb
+
+
+%%
+%Match the beginning pieces to middle or end pieces that share a branchpoint
+
+% give the branchpoint cluster associated with the branchpoint pixelidx
+Branchpointsfoundend(Branchpointsfoundend == 0) = NaN; 
+Branchpointsfoundstart(Branchpointsfoundstart == 0) = NaN;
+
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundstart);
+BPClusterStart = col; 
+clear col
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundend);
+BPClusterEnd = col; 
+clear col
+clear Branchpointsfoundend Branchpointsfoundstart
+%find the unique values per column - for rare instances with two values,
+%the smaller one goes to the Start Cluster and the larger one to the end
+%cluster, unless the slope is negative, then reverse this. 
+
+for k = 1:size(BPClusterStart,2)
+    C{1,k} = unique(BPClusterStart(:,k)); 
+    UniqueStart{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:size(BPClusterEnd,2)
+    C{1,k} = unique(BPClusterEnd(:,k)); 
+    UniqueEnd{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:length(UniqueEnd)
+    if neg_slope == 0
+    if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(1,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(2,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+    end
+    else 
+      if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(2,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(1,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+      end
+    end
+end
+
+clear BPClusterEnd BPClusterStart UniqueEnd UniqueStart
+
+%Find beginning, middle, end, and unconnected pieces
+Beginpieces = cell(1,Alllines.NumObjects);
+Endpieces = cell(1,Alllines.NumObjects);
+Midpieces = cell(1,Alllines.NumObjects);
+Unconnected = cell(1,Alllines.NumObjects);
+for k=1:size(BPClusterEnd2,2)
+       
+    if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 0
+        Beginpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "B";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 1
+        Endpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "E";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 0
+        Midpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "M";
+    else if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 1
+        Unconnected{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "U";
+        end
+        end
+        end
+    end
+end
+
+
+% NaN pad and cell2mat for BPCluster2.
+
+for k = 1:length(BPClusterStart2)
+    if isempty(BPClusterStart2{1,k}) == 1
+        BPClusterStart3{1,k} = NaN;
+    else BPClusterStart3{1,k} = BPClusterStart2{1,k};
+    end
+end
+        BPClusterStart3 = cell2mat(BPClusterStart3); 
+        
+for k = 1:length(BPClusterEnd2)
+    if isempty(BPClusterEnd2{1,k}) == 1
+        BPClusterEnd3{1,k} = NaN;
+    else BPClusterEnd3{1,k} = BPClusterEnd2{1,k};
+    end
+end
+        BPClusterEnd3 = cell2mat(BPClusterEnd3);
+        
+clear BPClusterStart2 BPClusterEnd2
+
+% BPClusterStarts for Midpieces and Endpieces, BPCLusterEnds for
+% Beginpieces and Midpieces: 
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "B" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Beg(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Beg(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Mid(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_Mid(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "E" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_End(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_End(1,k) = NaN;
+    end
+end
+
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    Beg_match_Beg{1,k} = find(BPClusterEnd_Beg == BPClusterEnd_Beg(1,k));
+    End_match_Beg{1,k} = find(BPClusterStart_End == BPClusterEnd_Beg(1,k));
+    Mid_match_Beg{1,k} = find(BPClusterStart_Mid == BPClusterEnd_Beg(1,k));
+    Beg_match_End{1,k} = find(BPClusterEnd_Beg == BPClusterStart_End(1,k));
+    Mid_match_End{1,k} = find(BPClusterEnd_Mid == BPClusterStart_End(1,k));
+    Beg_match_Mid{1,k} = find(BPClusterEnd_Beg == BPClusterStart_Mid(1,k));
+    Mid_match_Mid{1,k} = find(BPClusterEnd_Mid == BPClusterStart_Mid(1,k));
+    End_match_Mid{1,k} = find(BPClusterStart_End == BPClusterEnd_Mid(1,k));
+    
+    if Lineassign(1,k) == "B" && isempty(End_match_Beg{1,k}) == 1 && isempty(Mid_match_Beg{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "E" && isempty(Beg_match_End{1,k}) == 1 && isempty(Mid_match_End{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(Mid_match_Mid,2)
+    if Lineassign(1,k) == "M" && length(Mid_match_Mid{1,k}) == 1
+        if Mid_match_Mid{1,k} == k
+        Mid_match_Mid{1,k} = [];
+        else Mid_match_Mid{1,k} = Mid_match_Mid{1,k};
+        end
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+        
+% How many Mids are left nummids2? 
+NumMids2 = nnz(strcmp(Lineassign,'M'));
+
+while NumMids2 < NumMids
+    
+NumMids = NumMids2;
+clear NumMids2
+
+% BPClusterStarts for Midpieces and Endpieces, BPCLusterEnds for
+% Beginpieces and Midpieces: 
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "B" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Beg(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Beg(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Mid(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_Mid(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "E" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_End(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_End(1,k) = NaN;
+    end
+end
+
+
+%%
+%Find all Begs, mids, and ends that match a given beg
+for k= 1:length(BPClusterEnd3)
+    Beg_match_Beg{1,k} = find(BPClusterEnd_Beg == BPClusterEnd_Beg(1,k));
+    End_match_Beg{1,k} = find(BPClusterStart_End == BPClusterEnd_Beg(1,k));
+    Mid_match_Beg{1,k} = find(BPClusterStart_Mid == BPClusterEnd_Beg(1,k));
+    Beg_match_End{1,k} = find(BPClusterEnd_Beg == BPClusterStart_End(1,k));
+    Mid_match_End{1,k} = find(BPClusterEnd_Mid == BPClusterStart_End(1,k));
+    Beg_match_Mid{1,k} = find(BPClusterEnd_Beg == BPClusterStart_Mid(1,k));
+    Mid_match_Mid{1,k} = find(BPClusterEnd_Mid == BPClusterStart_Mid(1,k));
+    End_match_Mid{1,k} = find(BPClusterStart_End == BPClusterEnd_Mid(1,k));
+end
+
+    
+%Count how many pieces are intesecting
+%for k= 1:length(BPClusterEnd3)
+    %Total_pieces_matched(1,k) = length(Beg_match_Beg{1,k}) + length(End_match_Beg{1,k}) + length(Mid_match_Beg{1,k});
+%end
+
+
+%If Beg = 1, and mids + ends = 1 then match them up. 
+
+for k= 1:length(BPClusterEnd3)
+    if  length(Beg_match_Beg{1,k}) == 1 && isempty(Mid_match_Beg{1,k}) == 1 && length(End_match_Beg{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,End_match_Beg{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+    else if  length(Beg_match_Beg{1,k}) == 1 && length(Mid_match_Beg{1,k}) == 1 && isempty(End_match_Beg{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}))});
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Mid_match_Beg{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        end 
+    end
+end
+
+
+
+%%
+% If Beg = 1, and ends and mids > 1; 
+%report slope differences
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1 
+        if isempty(Mid_match_Beg{1,k}) == 1 %match with the right end
+            for j = 1:length(End_match_Beg{1,k})
+           Slope_comp_End1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Beg{1,k}(1,j))}));
+            end
+        else Slope_comp_End1{1,k} = NaN;
+        end
+    else Slope_comp_End1{1,k} = NaN;
+    end
+end
+
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1
+        if isempty(End_match_Beg{1,k}) == 1 %match with the right mid
+            for i = 1:length(Mid_match_Beg{1,k})
+           Slope_comp_Mid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Beg{1,k}(1,i))})); 
+            end
+         else Slope_comp_Mid1{1,k} = NaN;
+        end
+    else Slope_comp_Mid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) == 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1 && isempty(End_match_Beg{1,k}) == 0 && isempty(Mid_match_Beg{1,k}) == 0  %match with the right mid or end
+            for i = 1:length(Mid_match_Beg{1,k})
+            for j = 1:length(End_match_Beg{1,k})
+           Slope_comp_Mid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Beg{1,k}(1,i))})); 
+           Slope_comp_End1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Beg{1,k}(1,j))})); 
+            end
+            end
+    end
+end
+
+
+
+%match the ones with the smallest slope difference.
+%For ends
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_End1{1,k}) > 1
+            for j = 1:length(Slope_comp_End1{1,k})
+                if (Slope_comp_End1{1,k}(1,j)) == min(Slope_comp_End1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(End_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+%For mids
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_Mid1{1,k}) > 1
+            for j = 1:length(Slope_comp_Mid1{1,k})
+                if (Slope_comp_Mid1{1,k}(1,j)) == min(Slope_comp_Mid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%For mid/end
+for k= 1:length(BPClusterEnd3)
+    if ~isnan(Slope_comp_Mid1{1,k}(1,1)) == 1 && ~isnan(Slope_comp_End1{1,k}(1,1)) == 1
+            for j = 1:length(Slope_comp_End1{1,k})
+            for i = 1:length(Slope_comp_Mid1{1,k})
+                if (Slope_comp_Mid1{1,k}(1,i)) == min(([(Slope_comp_Mid1{1,1}); (Slope_comp_End1{1,1})]))
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,Mid_match_Beg{1,k}(1,i)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                else if (Slope_comp_End1{1,k}(1,j)) == min(([(Slope_comp_Mid1{1,1}); (Slope_comp_End1{1,1})]))
+                        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Beg{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Beg{1,k}(1,j)))}); 
+                        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                        Eachline{1,(End_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                    end
+                end
+            end
+            end
+    end
+end
+
+ 
+%%
+%If ends and mids = 1 and Beg > 1, then need to compare the E/M to the Begs
+%by slope. 
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) == 1 
+        if isempty(Mid_match_Beg{1,k}) == 1 %match with the right end
+            for j = 1:length(Beg_match_Beg{1,k})
+           Slope_comp_BegEnd1{1,k}(1,j) = abs((seg_slope_end{(Beg_match_Beg{1,k}(1,j))}) - (seg_slope_start{(End_match_Beg{1,k})}));
+            end
+        else Slope_comp_BegEnd1{1,k} = NaN;
+        end
+    else Slope_comp_BegEnd1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) == 1 
+        if isempty(End_match_Beg{1,k}) == 1 %match with the right mid
+            for j = 1:length(Beg_match_Beg{1,k})
+           Slope_comp_BegMid1{1,k}(1,j) = abs((seg_slope_end{(Beg_match_Beg{1,k}(1,j))}) - (seg_slope_start{(Mid_match_Beg{1,k})}));
+            end
+        else Slope_comp_BegMid1{1,k} = NaN;
+        end
+    else Slope_comp_BegMid1{1,k} = NaN;
+    end
+end
+
+clear k j i 
+
+
+%match the right beg up to the E/M
+
+for k= 1:numel(BPClusterEnd3)
+    if numel(Slope_comp_BegMid1{1,k}) > 1
+       for j = 1:numel(Slope_comp_BegMid1{1,k}) 
+            if (Slope_comp_BegMid1{1,k}(1,j)) == min(Slope_comp_BegMid1{1,k})
+                    Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,1))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,(Beg_match_Beg{1,k}(1,j))))});          
+                    Eachline{1,(Mid_match_Beg{1,k}(1,1))} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                    Eachline{1,(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+            end
+       end
+    end
+end
+
+
+
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_BegEnd1{1,k}) > 1 
+            for j = 1:length(Slope_comp_BegEnd1{1,k})
+                if (Slope_comp_BegEnd1{1,k}(1,j)) == min(Slope_comp_BegEnd1{1,k})
+        Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k})))}); 
+        Eachline{1,(End_match_Beg{1,k})} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%%
+%If End/mids >1, and Begs >1, then can compare slopes and match. 
+%calc slope for each Beg piece 
+
+
+for k = 1: length(BPClusterEnd3)
+    for i = 1:length(Beg_match_Beg{1,k})
+    if length(Beg_match_Beg{1,k}) > 1 
+        slopebegtemp(1,i) = (seg_slope_end{(Beg_match_Beg{1,k}(1,i))});
+    else slopebegtemp(1,i) = NaN;   
+    end
+    end
+    for j = 1:length(Mid_match_Beg{1,k})
+    if length(Mid_match_Beg{1,k}) >= 1   
+        slopemidtemp(j,1) = seg_slope_start{(Mid_match_Beg{1,k}(1,j))};
+    else slopemidtemp(j,1) = NaN;
+    end
+    end
+    for m = 1:length(End_match_Beg{1,k})
+    if length(End_match_Beg{1,k}) >= 1    
+        slopeendtemp(m,1) = seg_slope_start{(End_match_Beg{1,k}(1,m))};
+    else slopeendtemp(m,1) = NaN;
+    end
+    end   
+    if length(Beg_match_Beg{1,k}) > 1 && (length(Mid_match_Beg{1,k}) + length(End_match_Beg{1,k})) > 1
+        if length(End_match_Beg{1,k}) >= 1
+           Slope_comp_BegsEnds2{1,k} = abs(slopeendtemp - slopebegtemp);
+        else  Slope_comp_BegsEnds2{1,k} = NaN;
+        end
+        if length(Mid_match_Beg{1,k}) >= 1
+           Slope_comp_BegsMids2{1,k} = abs(slopemidtemp - slopebegtemp);
+        else Slope_comp_BegsMids2{1,k} = NaN;
+        end
+    else  Slope_comp_BegsEnds2{1,k} = NaN;
+          Slope_comp_BegsMids2{1,k} = NaN;
+    end
+    clear slopebegtemp slopemidtemp slopeendtemp
+end
+
+%compare slopes and match em up
+%for mids
+
+for k= 1:length(BPClusterEnd3)
+    if (isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids 
+       [V,I]=min(Slope_comp_BegsMids2{1,k},[],'all','linear');
+       [i,j]=ind2sub(size(Slope_comp_BegsMids2{1,k}),I);          
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,(Mid_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+    end
+    clear V I i j;
+end
+
+%for ends
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with ends 
+       [V,I]=min(Slope_comp_BegsEnds2{1,k},[],'all','linear');
+       [i,j]=ind2sub(size(Slope_comp_BegsEnds2{1,k}),I);          
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(End_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+    end
+    clear V I i j;
+end
+
+
+% for mids and ends.
+ 
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids and ends 
+        [r,c] = size(Slope_comp_BegsEnds2{1,k});
+        for i = 1:r
+            for j = 1:c
+               if (Slope_comp_BegsEnds2{1,k}(i,j)) == (min([(Slope_comp_BegsMids2{1,k});(Slope_comp_BegsEnds2{1,k})] ,[],'all'))                
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(End_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_End(1,(End_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(End_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+               end
+            end
+        end
+clear r c i j
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if (~isnan(Slope_comp_BegsEnds2{1,k}(1,1)) == 1) && (~isnan(Slope_comp_BegsMids2{1,k}(1,1)) == 1) %for matching with mids and ends 
+        [r,c] = size(Slope_comp_BegsMids2{1,k});
+        for i = 1:r
+            for j = 1:c
+               if (Slope_comp_BegsMids2{1,k}(i,j)) == (min([(Slope_comp_BegsMids2{1,k});(Slope_comp_BegsEnds2{1,k})] ,[],'all'))                
+       Eachline{1,end+1} = (Eachline{1,(Beg_match_Beg{1,k}(1,j))})|(Eachline{1,(Mid_match_Beg{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterStart_Mid(1,(Mid_match_Beg{1,k}(1,i))))}); 
+       Eachline{1,(Mid_match_Beg{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+       Eachline{(Beg_match_Beg{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+               end
+            end
+        end
+clear r c i j
+    end
+end
+
+%match mids up with begs or ends if they are alone
+%match a mid with a lone begin
+for k=1:size(BPClusterEnd3,2)
+    if  Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Beg_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2)); 
+    end
+end
+%match a mid with a lone end
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,End_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+	end
+end
+%match a mid with a lone mid
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1 && length(Mid_match_Mid{1,k}) == 1 
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Mid_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));     
+	end
+end
+
+%match a mid up with a lone Beg and end
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 
+Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k})})|(Eachline{1,(End_match_Mid{1,k})})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}))}); 
+Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+Eachline{1,Beg_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));
+Eachline{1,End_match_Mid{1,k}} = zeros(size(Imageskel, 1), size(Imageskel,2));
+	end
+end
+
+%%
+%match mids up with the best end or mid
+
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) > 1
+        if isempty(Mid_match_Mid{1,k}) == 1 %match with the right end
+            for j = 1:length(End_match_Mid{1,k})
+           Slope_comp_MidEnd1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Mid{1,k}(1,j))}));
+            end
+        end
+    else Slope_comp_MidEnd1{1,k} = NaN;
+    end
+end
+
+
+for k= 1:length(BPClusterEnd3)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(Mid_match_Mid{1,k}) > 1
+        if isempty(End_match_Mid{1,k}) == 1 %match with the right mid
+            for i = 1:length(Mid_match_Mid{1,k})
+           Slope_comp_MidMid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Mid{1,k}(1,i))})); 
+            end
+        end
+    else Slope_comp_MidMid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && length(End_match_Mid{1,k}) >= 1 && length(Mid_match_Mid{1,k}) >= 1
+            for i = 1:length(Mid_match_Mid{1,k})
+            for j = 1:length(End_match_Mid{1,k})
+           Slope_comp_MidMid1{1,k}(1,i) = abs((seg_slope_end{1,k}) - (seg_slope_start{(Mid_match_Mid{1,k}(1,i))})); 
+           Slope_comp_MidEnd1{1,k}(1,j) = abs((seg_slope_end{1,k}) - (seg_slope_start{(End_match_Mid{1,k}(1,j))})); 
+            end
+            end
+    end
+end
+
+
+
+
+%match the ones with the smallest slope difference.
+%For ends
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_MidEnd1{1,k}) > 1
+            for j = 1:length(Slope_comp_MidEnd1{1,k})
+                if (Slope_comp_MidEnd1{1,k}(1,j)) == min(Slope_comp_MidEnd1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(End_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+
+%For mids
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_MidMid1{1,k}) > 1
+            for j = 1:length(Slope_comp_MidMid1{1,k})
+                if (Slope_comp_MidMid1{1,k}(1,j)) == min(Slope_comp_MidMid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    end
+end
+
+%For mid/end
+for k= 1:length(BPClusterEnd3)
+    if ~isnan(Slope_comp_MidMid1{1,k}(1,1)) == 1 && ~isnan(Slope_comp_MidEnd1{1,k}(1,1)) == 1
+            for j = 1:length(Slope_comp_MidEnd1{1,k})
+            for i = 1:length(Slope_comp_MidMid1{1,k})
+                if (Slope_comp_MidMid1{1,k}(1,i)) == min(([(Slope_comp_MidMid1{1,1}); (Slope_comp_MidEnd1{1,1})]))
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Mid_match_Mid{1,k}(1,i))})|(EachDilatedBP{1,(BPClusterEnd_Mid(1,Mid_match_Mid{1,k}(1,i)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Mid_match_Mid{1,k}(1,i))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                else if (Slope_comp_MidEnd1{1,k}(1,j)) == min(([(Slope_comp_MidMid1{1,1}); (Slope_comp_MidEnd1{1,1})]))
+                        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(End_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterStart_End(1,End_match_Mid{1,k}(1,j)))}); 
+                        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+                        Eachline{1,(End_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                    end
+                end
+            end
+            end
+    end
+end
+
+%match with best begin: 
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && length(Beg_match_Mid{1,k}) > 1
+            for j = 1:length(Beg_match_Mid{1,k})
+           Slope_comp_BegMid1{1,k}(1,j) = abs((seg_slope_start{1,k}) - (seg_slope_end{(Beg_match_Mid{1,k}(1,j))}));
+            end  
+    else Slope_comp_BegMid1{1,k} = NaN;
+    end
+end
+
+for k= 1:length(BPClusterEnd3)
+    if length(Slope_comp_BegMid1{1,k}) > 1
+            for j = 1:length(Slope_comp_BegMid1{1,k})
+                if (Slope_comp_BegMid1{1,k}(1,j)) == min(Slope_comp_BegMid1{1,k})
+        Eachline{1,end+1} = (Eachline{1,k})|(Eachline{1,(Beg_match_Mid{1,k}(1,j))})|(EachDilatedBP{1,(BPClusterEnd_Beg(1,Beg_match_Mid{1,k}(1,j)))}); 
+        Eachline{1,k} =  zeros(size(Imageskel, 1), size(Imageskel,2)); 
+        Eachline{1,(Beg_match_Mid{1,k}(1,j))} = zeros(size(Imageskel, 1), size(Imageskel,2));
+                end
+            end
+    
+    end
+end
+
+
+
+
+%%
+%cleanup the list of lines before looping
+%remove all cells that have just the branchpoint cluster in them. 
+
+for i = 1:length(EachDilatedBP)
+Eachline(cellfun(@(c) isequal(c, EachDilatedBP{1,i}), Eachline)) = [];
+end
+
+%is this working?
+%for k = 1:length(Eachline)
+    %T = (Eachline{1,k} - DilateBranchpoint);
+    %T = my_changem(T, [0], [-1]);
+    %if sum(T, 'all') == 0
+       % Eachline{1,k} = {};
+   % end
+%clear T
+%end
+
+%remove all the empty cells in Eachline
+for k = 1:length(Eachline)
+    if ~isempty(Eachline{1,k}) == 1 && sum(Eachline{1,k}, 'all') == 0
+        Eachline{1,k} = {};
+    end
+
+end
+
+Eachline = Eachline(~cellfun('isempty',Eachline));
+
+%thin the lines.
+for k=1:length(Eachline)
+    if isempty(Eachline{1,k}) == 0
+Eachline{1,k} = bwmorph((Eachline{1,k}), 'thin', Inf);
+    else Eachline{1,k} = {};
+    end
+end
+
+%keep single largest object in Each eachline
+for k = 1: size(Eachline,2)
+Eachline{1,k} = bwareafilt(Eachline{1,k}, 1); 
+end
+
+clear Beg_match_Beg Beginpieces BorderpixelIdxendmat2 BorderpixelIdxstartmat2 BorderpixelsIdx BPClusterEnd3 BPClusterEnd_Beg BPClusterEnd_Mid BPClusterStart3 BPClusterStart_End BPClusterStart_Mid
+clear EachborderPixels EachdilatedEndpoint Eachendpoint End_match_Beg Endpieces Imageendpoints Lineassign Mid_match_Beg Midpieces neg_slope overall_slope pixelcoordsortflip 
+clear seg_slope_end seg_slope_start Slope_comp_BegEnd1 Slope_comp_BegMid1 smoothcoord Unconnected
+clear k m i r Slope_comp_End1 Slope_comp_Mid1 Slope_comp_BegsEnds2 Slope_comp_BegsMids2 Beg_match_End Beg_match_Mid Mid_match_End
+clear Mid_match_Mid End_match_Mid Slope_comp_MidEnd1 Slope_comp_MidMid1
+
+
+%get the X,Y coordinates of the pixellist, the final output here (pixelcoordsortflip) has
+%column 1 is the kymoY (time as frame number) and column2 is the kymoX(position as pixel)
+
+
+for k = 1:length(Eachline)
+    pixelcoord{1,k} = regionprops(Eachline{1,k}, 'Pixellist'); 
+    pixelcoordsorted{1,k} = sortrows(pixelcoord{1,k}.PixelList, 2);
+    pixelcoordsortflip{1,k}(:,1) = pixelcoordsorted{1,k}(:,2); 
+    pixelcoordsortflip{1,k}(:,2) = pixelcoordsorted{1,k}(:,1); 
+end
+
+clear pixelcoord pixelcoordsorted;
+
+% Flag negative slope lines
+for k = 1: length(pixelcoordsortflip)
+overall_slope{1,k}= (pixelcoordsortflip{1,k}(end,2))-(pixelcoordsortflip{1,k}(1,2));
+if overall_slope{1,k} < 0
+neg_slope(1,k) = 1;
+else neg_slope(1,k) = 0;
+end
+end
+
+
+% smooth the data, determine slope of start and end segments. 
+seg_slope_start = cell(1, length(pixelcoordsortflip));
+seg_slope_end = cell(1, length(pixelcoordsortflip));   
+for k = 1:length(pixelcoordsortflip)
+    %get track,x here is arbitrary time (framrate) and y is position
+    x = [1:size(pixelcoordsortflip{1,k},1)]';
+    y=pixelcoordsortflip{1,k}(:,2);
+    
+    %smooth the data
+    y_smooth = smooth(y);
+    smoothcoord{1,k} = smooth(pixelcoordsortflip{1,k}(:,2)); 
+    
+    %calculate the slope of the first and last 15 frames = 7.5 seconds for minidimer (can modify this based
+    %on frame rate if needed)
+    if length(y_smooth) > 15
+     slopestart=(y_smooth(15)-y_smooth(1))/(x(15)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(end-14))/(x(end)-x(end-14));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    else 
+     slopestart=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+     slopeend=(y_smooth(end)-y_smooth(1))/(x(end)-x(1));
+        seg_slope_start{1,k}=slopestart(1);
+        seg_slope_end{1,k}=slopeend(1);
+    end
+    clear x y y_smooth slopestart slopeend
+end
+
+%%
+%Match endpoints with branchpoints 
+
+%find startpoints/endpoints for each line segment
+Imageendpoints = bwmorph(Imagebranchremove2, 'endpoint'); 
+
+for k = 1:numel(Eachline)
+Eachendpoint{1,k} = bwmorph(Eachline{1,k}, 'endpoint'); 
+end
+
+% dilate out one pixel from each endpoint and make cell array of border pixels to the startpoints and endpoints
+for k = 1:length(Eachendpoint)
+EachdilatedEndpoint{1,k} = imdilate(Eachendpoint{1,k}, true(3));
+EachborderPixels{1,k} = bwperim(EachdilatedEndpoint{1,k});
+end
+
+
+%Make PixelIdxList for the startpoint and endpoint border pixels  
+for k = 1:length(EachborderPixels)
+    BorderpixelsIdx{1,k} = regionprops(EachborderPixels{1,k}, 'PixelIdxList'); 
+   
+if neg_slope(1,k) == 0
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+    end
+   
+else
+    if length(BorderpixelsIdx{1,k}) == 2
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(2,1), numel(BorderpixelsIdx{1,k}(2,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+    else
+BorderpixelIdxstart{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+BorderpixelIdxend{1,k} = reshape(BorderpixelsIdx{1,k}(1,1), numel(BorderpixelsIdx{1,k}(1,1)), 1);
+
+
+    end
+end
+
+    BorderpixelIdxstart2{1,k} = (BorderpixelIdxstart{1,k}.PixelIdxList);
+    BorderpixelIdxend2{1,k} = (BorderpixelIdxend{1,k}.PixelIdxList);
+end
+
+ clear BorderpixelIdxstart BorderpixelIdxend
+ 
+%NaN pad the BorderPixelIdxLists and make them a matrix.
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxstart2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxstart2)
+        for j=cellfun('size',BorderpixelIdxstart2(i),1)+1:maxLengthCell
+             BorderpixelIdxstart2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxstartmat2=cell2mat(BorderpixelIdxstart2); %This makes it a matrix
+clear maxLengthCell
+
+    maxLengthCell=max(cellfun('size',BorderpixelIdxend2,1));  %finding the longest vector in the cell array
+    for i=1:length(BorderpixelIdxend2)
+        for j=cellfun('size',BorderpixelIdxend2(i),1)+1:maxLengthCell
+             BorderpixelIdxend2{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   BorderpixelIdxendmat2=cell2mat(BorderpixelIdxend2); %This makes it a matrix
+clear maxLengthCell BorderpixelIdxstart2 BorderpixelIdxend2
+
+% Convert the dilated branchpoint matrix into PixelIdxList
+ImagebranchPixelIdxList = (struct2cell(regionprops(DilateBranchpoint, 'PixelIdxList'))); 
+%ImagebranchPixelIdxList2 = cat(1, ImagebranchPixelIdxList{:});
+
+%NaN pad the ImagebranchPixeslIdxList and make it a matrix.
+
+    maxLengthCell=max(cellfun('size',ImagebranchPixelIdxList,1));  %finding the longest vector in the cell array
+    for i=1:length(ImagebranchPixelIdxList)
+        for j=cellfun('size',ImagebranchPixelIdxList(i),1)+1:maxLengthCell
+             ImagebranchPixelIdxList{i}(j)=NaN;   %zeropad the elements in each cell array with a length shorter than the maxlength
+        end
+    end
+    
+   ImagebranchPixelIdxListmat2=cell2mat(ImagebranchPixelIdxList); %This makes it a matrix
+clear maxLengthCell ImagebranchPixelIdxList
+
+%Find branchpoints pixels that overlap with the startpoint and endpoint borderpixels
+
+[~, Locb] = ismember(BorderpixelIdxendmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundend = Locb; 
+clear Locb
+[~, Locb] = ismember(BorderpixelIdxstartmat2, ImagebranchPixelIdxListmat2);
+Branchpointsfoundstart = Locb;
+clear Locb
+
+
+%%
+%Match the beginning pieces to middle or end pieces that share a branchpoint
+
+% give the branchpoint cluster associated with the branchpoint pixelidx
+Branchpointsfoundend(Branchpointsfoundend == 0) = NaN; 
+Branchpointsfoundstart(Branchpointsfoundstart == 0) = NaN;
+
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundstart);
+BPClusterStart = col; 
+clear col
+[~,col] = ind2sub(size(ImagebranchPixelIdxListmat2), Branchpointsfoundend);
+BPClusterEnd = col; 
+clear col
+clear Branchpointsfoundend Branchpointsfoundstart
+%find the unique values per column - for rare instances with two values,
+%the smaller one goes to the Start Cluster and the larger one to the end
+%cluster, unless the slope is negative, then reverse this. 
+
+for k = 1:size(BPClusterStart,2)
+    C{1,k} = unique(BPClusterStart(:,k)); 
+    UniqueStart{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:size(BPClusterEnd,2)
+    C{1,k} = unique(BPClusterEnd(:,k)); 
+    UniqueEnd{1,k} = (rmmissing(C{1,k})); 
+    clear C
+end 
+
+for k = 1:length(UniqueEnd)
+    if neg_slope == 0
+    if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(1,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(2,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+    end
+    else 
+      if length(UniqueEnd{1,k}) == 2
+        BPClusterStart2{1,k} = UniqueEnd{1,k}(2,1);
+        BPClusterEnd2{1,k} = UniqueEnd{1,k}(1,1);
+    else
+        BPClusterStart2{1,k} = UniqueStart{1,k};
+        BPClusterEnd2{1,k} = UniqueEnd{1,k};
+      end
+    end
+end
+
+clear BPClusterEnd BPClusterStart UniqueEnd UniqueStart
+
+%Find beginning, middle, end, and unconnected pieces
+Beginpieces = cell(1,Alllines.NumObjects);
+Endpieces = cell(1,Alllines.NumObjects);
+Midpieces = cell(1,Alllines.NumObjects);
+Unconnected = cell(1,Alllines.NumObjects);
+for k=1:size(BPClusterEnd2,2)
+       
+    if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 0
+        Beginpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "B";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 1
+        Endpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "E";
+    else if isempty(BPClusterStart2{1,k}) == 0 && isempty(BPClusterEnd2{1,k}) == 0
+        Midpieces{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "M";
+    else if isempty(BPClusterStart2{1,k}) == 1 && isempty(BPClusterEnd2{1,k}) == 1
+        Unconnected{1,k} = Eachline{1,k};
+        Lineassign(1,k) = "U";
+        end
+        end
+        end
+    end
+end
+
+
+% NaN pad and cell2mat for BPCluster2.
+
+for k = 1:length(BPClusterStart2)
+    if isempty(BPClusterStart2{1,k}) == 1
+        BPClusterStart3{1,k} = NaN;
+    else BPClusterStart3{1,k} = BPClusterStart2{1,k};
+    end
+end
+        BPClusterStart3 = cell2mat(BPClusterStart3); 
+        
+for k = 1:length(BPClusterEnd2)
+    if isempty(BPClusterEnd2{1,k}) == 1
+        BPClusterEnd3{1,k} = NaN;
+    else BPClusterEnd3{1,k} = BPClusterEnd2{1,k};
+    end
+end
+        BPClusterEnd3 = cell2mat(BPClusterEnd3);
+        
+clear BPClusterStart2 BPClusterEnd2
+
+% BPClusterStarts for Midpieces and Endpieces, BPCLusterEnds for
+% Beginpieces and Midpieces: 
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "B" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Beg(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Beg(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterEnd3(1,k)) == 1 
+        BPClusterEnd_Mid(1,k) = BPClusterEnd3(1,k); 
+    else BPClusterEnd_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "M" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_Mid(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_Mid(1,k) = NaN;
+    end
+end
+
+for k = 1:length(Lineassign)
+    if Lineassign(1,k) == "E" && ~isnan(BPClusterStart3(1,k)) == 1 
+        BPClusterStart_End(1,k) = BPClusterStart3(1,k); 
+    else BPClusterStart_End(1,k) = NaN;
+    end
+end
+
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    Beg_match_Beg{1,k} = find(BPClusterEnd_Beg == BPClusterEnd_Beg(1,k));
+    End_match_Beg{1,k} = find(BPClusterStart_End == BPClusterEnd_Beg(1,k));
+    Mid_match_Beg{1,k} = find(BPClusterStart_Mid == BPClusterEnd_Beg(1,k));
+    Beg_match_End{1,k} = find(BPClusterEnd_Beg == BPClusterStart_End(1,k));
+    Mid_match_End{1,k} = find(BPClusterEnd_Mid == BPClusterStart_End(1,k));
+    Beg_match_Mid{1,k} = find(BPClusterEnd_Beg == BPClusterStart_Mid(1,k));
+    Mid_match_Mid{1,k} = find(BPClusterEnd_Mid == BPClusterStart_Mid(1,k));
+    End_match_Mid{1,k} = find(BPClusterStart_End == BPClusterEnd_Mid(1,k));
+    
+    if Lineassign(1,k) == "B" && isempty(End_match_Beg{1,k}) == 1 && isempty(Mid_match_Beg{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "E" && isempty(Beg_match_End{1,k}) == 1 && isempty(Mid_match_End{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(Mid_match_Mid,2)
+    if Lineassign(1,k) == "M" && length(Mid_match_Mid{1,k}) == 1
+        if Mid_match_Mid{1,k} == k
+        Mid_match_Mid{1,k} = [];
+        else Mid_match_Mid{1,k} = Mid_match_Mid{1,k};
+        end
+    end
+end
+
+%Curating the lineassign - if no possible matches, call it unconnected
+for k=1:size(BPClusterEnd3,2)
+    if Lineassign(1,k) == "M" && isempty(Beg_match_Mid{1,k}) == 1 && isempty(Mid_match_Mid{1,k}) == 1 && isempty(End_match_Mid{1,k}) == 1
+        Lineassign(1,k) = "U";
+    end
+end
+        
+% How many Mids are left nummids2? 
+NumMids2 = nnz(strcmp(Lineassign,'M'));
+
+end
+
+clear Beg_match_Beg Beginpieces BorderpixelIdxendmat2 BorderpixelIdxstartmat2 BorderpixelsIdx BPClusterEnd3 BPClusterEnd_Beg BPClusterEnd_Mid BPClusterStart3 BPClusterStart_End BPClusterStart_Mid
+clear EachborderPixels EachdilatedEndpoint Eachendpoint End_match_Beg Endpieces Imageendpoints Lineassign Mid_match_Beg Midpieces neg_slope overall_slope pixelcoordsortflip 
+clear seg_slope_end seg_slope_start Slope_comp_BegEnd1 Slope_comp_BegMid1 smoothcoord Unconnected
+clear k m i r Slope_comp_End1 Slope_comp_Mid1 Slope_comp_BegsEnds2 Slope_comp_BegsMids2 Beg_match_End Beg_match_Mid Mid_match_End
+clear Mid_match_Mid End_match_Mid Slope_comp_MidEnd1 Slope_comp_MidMid1
+
+
+for k = 1:length(Eachline)
+    pixelcoord{1,k} = regionprops(Eachline{1,k}, 'Pixellist'); 
+    pixelcoordsorted{1,k} = sortrows(pixelcoord{1,k}.PixelList, 2);
+    pixelcoordsortflip{1,k}(:,1) = pixelcoordsorted{1,k}(:,2); 
+    pixelcoordsortflip{1,k}(:,2) = pixelcoordsorted{1,k}(:,1); 
+end
+
+for k = 1:length(Eachline)
+mt_length{1,k} = size(Eachline{1,k},2); %in pixels
+video_time{1,k} = size(Eachline{1,k},1);%in pixels
+end
+
+
+clear pixelcoord pixelcoordsorted AlldilatedBP Alllines DilateBranchpoint EachDilatedBP;
+clear Imagebranch ImagebranchPixelIdxListmat2 Imagebranchremove2 Imageskel;
+clear j k NumMids;
+
+end
