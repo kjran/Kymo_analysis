@@ -1,0 +1,348 @@
+function minidimer_autotrack()
+
+%Import classified kymos
+
+% Name analysis as folder name
+[~,name,~]=fileparts(pwd);
+
+Datafiles = dir('*jpg'); 
+numkymos = length(Datafiles); 
+kymos = cell(1,numkymos);
+
+%import kymos
+for k = 1:numkymos
+    kymos{1,k} =importdata(Datafiles(k).name);
+    filenames{k}=Datafiles(k).name;
+end
+
+%convert kymo to tracks 
+for z = 1: size(kymos,2)
+ Image = kymos{1,z};  
+ [pixelcoordsortflip, mt_length, video_time, Eachline, NumMids2]=autotrackkymos6(Image);
+ Tracks{1,z} = pixelcoordsortflip;
+ Mtlength{1,z} = mt_length;
+ Videotime{1,z} = video_time;
+ Eachline2{1,z} = Eachline;
+ NumMidsLeft{1,z} = NumMids2;
+ clear Image pixelcoorsortflip mt_length video_time Eachline NumMids2
+end
+
+%save figure of tracks for each kymo
+for a = 1:size(Tracks,2)
+    for b = 1:size(Tracks{1,a},2)
+plot(Tracks{1,a}{1,b}(:,2),(-1*(Tracks{1,a}{1,b}(:,1))), 'LineWidth', 2);
+hold on
+    end
+    hold off
+    xlim([0,size(kymos{1,a},2)])
+    ylim([(-1*(size(kymos{1,a},1))), 0])
+    savefig(sprintf('kymo%d.fig',a))
+end
+
+%Expand tracks
+for z = 1:size(Tracks,2)
+n(1,z)=length(Tracks{1,z});
+end
+numtracks=sum(n);
+framerate=0.5; %secs/frame or secs/y-pixel of kymogram
+pixelsize=157; %nanometers per x-pixel of kymogram
+tracks = horzcat(Tracks{:});
+% gather kymo info for each track (ie. mt length and video time in pixels)
+microtubule_length=horzcat(Mtlength{:}); %this is in pixels
+video_time=horzcat(Videotime{:});%this is in pixels
+
+% Collect particle tracks from each file
+
+particle=cell(1,numtracks); %this is the position in the kymograph
+particle_yposition=cell(1,numtracks); %this is the y_position (ie time) in the kymograph
+
+for k = 1:size(tracks,2)
+    particle{1,k}=tracks{1,k}(:,2);
+    particle_yposition{1,k}=tracks{1,k}(:,1);
+end
+
+%% Collect slope data based on changepts function
+
+changepts=cell(1,size(particle,2));
+particle_seg_slope=cell(1,size(particle,2));
+particle_runLength=cell(1,size(particle,2));
+total_run_length=zeros(1,size(particle,2));
+
+for k=1:size(particle,2)
+    
+    % get the track
+    particle_ypositionadj{1,k} = particle_yposition{1,k}-(particle_yposition{1,k}(1,1)-1); %adjusted time pixels
+    x=particle_yposition{1,k}-(particle_yposition{1,k}(1,1)-1); %adjusted time pixels
+    y=particle{k}; %position pixels
+    % smooth data
+   y_smooth1=smooth(y); % smoothed position pixels
+   x_smooth1=smooth(x); % smoothed time pixels
+    
+ 
+    %For points that have multiple position pixels for a given time
+    % pixel select the larger position pixel
+     for p=1:(size(x_smooth1,1)-1)
+         
+       if x_smooth1(p,1) == x_smooth1(p+1,1)
+          x_smooth1(p,1) = NaN;
+          y_smooth1(p,1) = NaN;
+       end
+     end
+ 
+     x_smooth2 = rmmissing(x_smooth1);
+     y_smooth2 = rmmissing(y_smooth1);
+    
+     
+    %For points that have multiple position pixels for a given time
+    % pixel select the largest position pixel
+    
+    xy =horzcat(x_smooth2,y_smooth2);
+    
+    [ux,~,idx]  = unique(xy(:,1)); %what do they correspond to?
+    ymax = accumarray(idx,xy(:,2),[],@max); %build matrix
+    [ux ymax];
+    
+    % smooth data
+   y_smooth=smooth(ymax); % smoothed position pixels
+   x_smooth=smooth(ux); % smoothed time pixels
+   
+      
+    % get total run length (in pixels) for each particle
+    total_run_length(k)=y_smooth(end,1)-y_smooth(1,1); % determine the total distance traveled by particle
+    
+    % get total run time (in pixels) for each particle
+    total_run_time(k)=x_smooth(end)-x_smooth(1,1);
+
+
+    % Determine the changepts --  'Statistic', 'linear' specifices to test the slope
+    % MinDistance = minimum # of datapoints within a changept section
+    % MinThreshold = minimum error improvement before accepting an
+    % additional changept
+
+    changepts{1,k}=findchangepts(y_smooth,'Statistic','linear','MinDistance',20,'MinThreshold',10);
+    
+    % if changepts returns no significant change in slope (is empty)
+    % fit track with a single line.
+     
+    if isempty(changepts{1,k}) && length(y_smooth) > 3
+        slope=polyfit(x_smooth, y_smooth, 1);
+        particle_seg_slope{1,k}=slope(1);
+        particle_runLength{1,k}(1,1)=y_smooth(end,1)-y_smooth(1,1); % determine the run length (in distance pixels)
+        particle_runLength{1,k}(1,2)=x_smooth(end,1)-x_smooth(1,1); % get duration of (in time ie. kymo y-pixels)
+
+        else if isempty(changepts{1,k}) && length(y_smooth) < 3
+        particle_seg_slope{1,k}=NaN;
+        particle_runLength{1,k}(1,1)=NaN; % determine the run length (in distance pixels)
+        particle_runLength{1,k}(1,2)=NaN; % get duration of (in time ie. kymo y-pixels)
+
+           
+    else
+    
+    % Fit each changepoint section with a line, get slope
+    
+    for i=1:size(changepts{1,k},1)
+        
+        if i==1 % for the first segment
+            y2=y_smooth(1:changepts{1,k}(i,1),1);
+            x2=x_smooth(1:changepts{1,k}(i,1),1);
+            particle_runLength{1,k}=y2(end)-y2(1,1); % run distance
+            particle_runLength{1,k}(i,2)=x2(end)-x2(1,1); % time
+            
+        else % for all the middle segments
+        y2=y_smooth(changepts{1,k}(i-1,1):changepts{1,k}(i,1),1);
+        x2=x_smooth(changepts{1,k}(i-1,1):changepts{1,k}(i,1),1);
+        particle_runLength{1,k}(i,1)=y2(end)-y2(1,1); % distant between slope changes (run length)
+        particle_runLength{1,k}(i,2)=x2(end)-x2(1,1); % time between slope changes, in y-pixels   
+        end
+        
+        
+        slope=polyfit(x2,y2,1); % get the slope of the track segment.
+        particle_seg_slope{1,k}(i,1)=slope(1); 
+         
+        if i==size(changepts{1,k},1) % for the last segment
+            y2=y_smooth(changepts{1,k}(i,1):end,1);
+            x2=x_smooth(changepts{1,k}(i,1):end,1);
+            particle_runLength{1,k}(i+1,1)=y2(end)-y2(1,1); % distant between slope changes (run length)
+            particle_runLength{1,k}(i+1,2)=x2(end)-x2(1,1); % time between slope changes, in y-pixels
+
+            slope=polyfit(x2,y2,1); % get the slope of the track segment.
+            particle_seg_slope{1,k}(i+1,1)=slope(1);
+        end
+    end
+    
+    end
+    clear x y x2 y2 f slope y_smooth x_smooth ux ymax xy y_smooth2 y_smooth1 x_smooth2 x_smooth1
+   end
+end
+
+%% Basic plots & Analysis
+
+seg_slopes=[]; % segment slopes (pixel/pixel)
+seg_runtimes=[]; % time spent at each segment (pixel)
+seg_rundists=[]; % distance traveled by a particle during the segment (pixel)
+
+for k=1:size(particle_seg_slope,2)
+    seg_slopes=[seg_slopes; particle_seg_slope{k}];
+    seg_rundists=[seg_rundists;particle_runLength{k}(:,1)];
+    seg_runtimes=[seg_runtimes;particle_runLength{1,k}(:,2)];
+end
+
+% convert from pixel values
+
+seg_velocities=seg_slopes*pixelsize./framerate; % convert slopes to nm/s
+seg_rundists_nm=seg_rundists*pixelsize; % convert distance to nm/s
+seg_runtimes_s=seg_runtimes*framerate; % convert y-pixels to secs
+
+%total run distance in micron
+total_rundist_micron=(total_run_length.*pixelsize)/1000;
+
+%total run distance in nm
+total_rundist_nm=(total_run_length.*pixelsize);
+
+% microtubule lengths in µm transposed
+microtubule_length=cell2mat(microtubule_length);
+microtubule_length_micron=(microtubule_length.*(pixelsize/1000))';
+
+%video duration in sec
+video_time=cell2mat(video_time);
+video_time_sec=(video_time.*(framerate));
+
+%landing rate (#events/micron for each microtubule) theres a better
+%way to do this by referencing previous values in the mt length variable in
+%case two mts have the exact same length (unlikely given the #decimal places)
+[C,ia,ic]=unique(microtubule_length_micron);
+events_per_mt=accumarray(ic,1);
+value_counts=[C,events_per_mt];
+landing_rate=(value_counts(:,2)./value_counts(:,1));%number of events per micrometer per minute
+
+clear C ia ic;
+       
+%Pausing rate per micron (average # of pauses/micron traveled for each particle)
+for k=1:size(particle_seg_slope,2)
+    temp=particle_seg_slope{1,k};
+    if (total_rundist_micron(k) >= 0.628)
+        Pause_rate_per_micron(1,k)=numel(find(temp<0.05))./total_rundist_micron(k);
+    else Pause_rate_per_micron(1,k)=NaN;
+    end
+    clear temp;
+end
+filtered_Pause_rate_per_micron = rmmissing(Pause_rate_per_micron)';
+    
+%Pausing rate per minute (average # of pauses/time in minutes for each particle )
+for k=1:size(particle_seg_slope,2)
+    temp=particle_seg_slope{1,k};
+    Pause_rate_per_min(1,k)=(numel(find(temp<0.05))./(size(particle_yposition{k},1)./framerate)).*60;
+    clear temp;
+end
+
+% # Pauses / particle 
+for k=1:size(particle_seg_slope,2)
+    temp=particle_seg_slope{1,k};
+    Pauses_per_particle(1,k)=numel(find(temp<0.05));
+    clear temp;
+end
+
+%total_run_time in seconds
+total_run_time_s=total_run_time.*framerate;
+
+%average total velocity (nm/s)
+for k=1:size(particle_yposition,2)
+    average_total_velocity(k)=(total_rundist_nm(k))./(total_run_time_s(k));
+end
+
+%is it processive? (can use to filter things out for some parameters)
+for k=1:size(average_total_velocity,2)
+    if or(average_total_velocity(k)<15, total_rundist_nm(k)<628)
+    is_processive(k)=0;
+    else is_processive(k)=1;
+    end
+end
+
+%filtered total run distance in micron transposed
+
+for k=1:size(total_rundist_micron,2)
+    if is_processive(k)==1
+    filtered_total_rundist_micron(k)=total_rundist_micron(k);
+    else filtered_total_rundist_micron(k)=NaN;
+    end
+end
+filtered_total_rundist_micron = rmmissing(filtered_total_rundist_micron)';
+ 
+
+%average total velocity with stalled particles omitted then transposed
+for k=1:size(particle_yposition,2)
+    if is_processive(k)==1
+        filtered_average_total_velocity(k)=average_total_velocity(k);
+    else filtered_average_total_velocity(k)=NaN;
+    end
+end
+filtered_average_total_velocity = rmmissing(filtered_average_total_velocity)';
+
+%filtered total_run_time in seconds transposed (omits stalled runs)
+for k=1:size(particle_yposition,2)
+    if is_processive(k) == 1
+        filtered_total_run_time_s(k)=total_run_time_s(k);
+    else filtered_total_run_time_s(k)=NaN;
+    end
+end
+filtered_total_run_time_s = rmmissing(filtered_total_run_time_s)';
+
+%Percent processive(based on average velocity)
+percent_processive=numel(find(average_total_velocity>=15))/numel(average_total_velocity);
+
+% changepoint frequency per micron
+for k=1:size(particle_yposition,2)
+    if (total_rundist_micron(k) >= 0.628)
+    changepts_per_micron(k)=(length(changepts(k))./total_rundist_micron(k));
+    else changepts_per_micron(k)=NaN;
+    end
+end
+filtered_changepts_per_micron = rmmissing(changepts_per_micron)';
+
+
+%filtered segment velocities, segment rundist, segment runtime (>=15nm/s and >=628nm)
+for k=1:size(seg_velocities,1)
+    if (and (seg_velocities(k) >= 15, seg_rundists_nm(k) >= 628))
+    segvel(k,1) = seg_velocities(k,1);
+    segdist(k,1) = seg_rundists_nm(k,1);
+    segtime(k,1) = seg_runtimes_s(k,1);
+    else segvel(k,1) = NaN;
+        segdist(k,1) = NaN; 
+        segtime(k,1) = NaN;
+    end
+end
+ 
+filtered_seg_velocities1 = rmmissing(segvel);
+filtered_seg_rundists_nm1 = rmmissing(segdist);
+filtered_seg_runtimes_s1 = rmmissing(segtime);
+clear segvel;
+clear segdist;
+clear segtime;
+
+for k=1:size(filtered_seg_velocities1,1)
+    if (filtered_seg_velocities1(k) <= 500)
+    segvel(k,1) = filtered_seg_velocities1(k,1);
+    segdist(k,1) = filtered_seg_rundists_nm1(k,1);
+    segtime(k,1) = filtered_seg_runtimes_s1(k,1);
+    else segvel(k,1) = NaN;
+        segdist(k,1) = NaN; 
+        segtime(k,1) = NaN;
+    end
+end
+
+filtered_seg_velocities = rmmissing(segvel);
+filtered_seg_rundists_nm = rmmissing(segdist);
+filtered_seg_runtimes_s = rmmissing(segtime);
+clear segvel;
+clear segdist;
+clear segtime;
+clear filtered_seg_velocities1;
+clear filtered_seg_rundists_nm1;
+clear filtered_seg_runtimes_s1;
+
+
+
+%save file
+save(name);
+
+end
