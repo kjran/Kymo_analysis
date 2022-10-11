@@ -21,7 +21,7 @@ This script will analyze kinesin kymographs.
 Line references for common parameters you may want to change for your purposes:
 -	Framerate on line 48 (currently set as 0.2 sec per y-pixel in the kymograph)
 -	Pixelsize on line 49 (currently set as 157 nanometers per x-pixel in the kymograph)
--	Parameters of the findchangepts function on line 123 (currently set as MinDistance = 10; MinThreshold = 10)
+-	Parameters of the findchangepts function on line 122 (currently set as MinDistance = 10; MinThreshold = 10)
 -	“Basic plots and Analysis” has a description of the various calculations I performed and you should modify this to suit your preferred thresholds etc.
 
 **minidimer_autotrack**
