@@ -1,5 +1,7 @@
 READ ME
+
 Author: Kavi Rangan
+
 Description: I made these scripts to analyze kinesin and mini-dimer (dynein) kymograph images.
 
 Step 1: Use Ilastik to binarize your kymographs. 
