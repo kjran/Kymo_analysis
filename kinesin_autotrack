@@ -125,13 +125,13 @@ for k=1:size(particle,2)
     % if changepts returns no significant change in slope (is empty)
     % fit track with a single line.
      
-    if isempty(changepts{1,k}) & length(y_smooth) > 3
+    if isempty(changepts{1,k}) && length(y_smooth) >= 3
         slope=polyfit(x_smooth, y_smooth, 1);
         particle_seg_slope{1,k}=slope(1);
         particle_runLength{1,k}(1,1)=y_smooth(end,1)-y_smooth(1,1); % determine the run length (in distance pixels)
         particle_runLength{1,k}(1,2)=x_smooth(end,1)-x_smooth(1,1); % get duration of (in time ie. kymo y-pixels)
 
-        else if isempty(changepts{1,k}) & length(y_smooth) < 3
+        else if isempty(changepts{1,k}) && length(y_smooth) < 3
         particle_seg_slope{1,k}=NaN;
         particle_runLength{1,k}(1,1)=NaN; % determine the run length (in distance pixels)
         particle_runLength{1,k}(1,2)=NaN; % get duration of (in time ie. kymo y-pixels)
